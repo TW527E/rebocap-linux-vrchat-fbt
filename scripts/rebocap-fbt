@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# rebocap-fbt: start the Rebocap -> WiVRn bridge CLI (monad2steamvr) for VRChat full-body tracking.
+#
+# Rebocap and bridge.exe are started by the user from Bottles. This script checks that they are up,
+# runs the CLI with the right OpenXR runtime, shows only useful messages, and on Ctrl+C stops the CLI
+# and asks bridge.exe to exit through its bridge.quit file. It never kills Wine processes and never
+# touches Rebocap or the WiVRn server.
+#
+# usage: rebocap-fbt [10|6|ROLES] [--usb] [--keep-bridge] [--yaw DEG] [--offset X,Y,Z]
+
+set -u
+
+# Paths can be overridden from the environment.
+CLI="${REBOCAP_CLI:-$HOME/Downloads/rebocap-wivrn-bridge/target/release/monad2steamvr}"
+BOTTLE="${REBOCAP_BOTTLE:-$HOME/.var/app/com.usebottles.bottles/data/bottles/bottles/Rebocap}"
+APP_DIR="$BOTTLE/drive_c/Program Files (x86)/Rebocap"
+XR_JSON="${REBOCAP_XR_RUNTIME_JSON:-/usr/share/openxr/1/openxr_wivrn.json}"
+RECEIVER="${REBOCAP_RECEIVER:-/dev/serial/by-id/usb-JXQ_Ltd__Co_RebornBodyCap_RebornRX-if00}"
+BRIDGE_PORT=36850
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rebocap-fbt"
+
+# Rebocap roles: 0 waist, 1/2 upper legs, 3/4 lower legs, 5/6 feet, 7 chest,
+# 9/10 upper arms, 11/12 forearms.
+PRESET_10="0,1,2,5,6,7,9,10,11,12"
+PRESET_6="0,1,2,3,4,7"
+
+usage() {
+    cat <<'EOF'
+用法: rebocap-fbt [部位] [選項]
+
+部位:
+  10            平常的 10 點：腰、胸、雙腿、雙腳、雙上臂、雙前臂（預設）
+  6             6 點測試組：腰、雙大腿、雙小腿、胸
+  0,5,6         直接指定 Rebocap 部位編號
+                0 腰  1/2 大腿  3/4 小腿  5/6 腳  7 胸  9/10 上臂  11/12 前臂
+
+選項:
+  --usb         SolarXR 準備好後，透過 adb 讓頭顯用 USB 連 WiVRn
+  --keep-bridge 結束時不要關閉 bridge.exe
+  --yaw DEG     輸出方向修正（度）
+  --offset X,Y,Z 輸出位置修正（公尺）
+  -h, --help    顯示說明
+
+開始前：WiVRn 伺服器開著（頭顯先不要連），並在 Bottles 開好 Rebocap 與 bridge.exe。
+結束：按 Ctrl+C。Rebocap 請照平常關閉視窗。
+EOF
+}
+
+say() { printf '\033[1;36m[rebocap-fbt]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[rebocap-fbt] ⚠ %s\033[0m\n' "$*"; }
+die() { printf '\033[1;31m[rebocap-fbt] ✗ %s\033[0m\n' "$*" >&2; exit 1; }
+notify() { command -v notify-send >/dev/null && notify-send -a rebocap-fbt "Rebocap FBT" "$1"; }
+
+roles="$PRESET_10"
+usb=0
+keep_bridge=0
+extra=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        10 | full) roles="$PRESET_10" ;;
+        6) roles="$PRESET_6" ;;
+        --usb) usb=1 ;;
+        --keep-bridge) keep_bridge=1 ;;
+        --yaw) [ $# -ge 2 ] || die "--yaw 需要一個數值"; extra+=(--solarxr-yaw "$2"); shift ;;
+        --offset) [ $# -ge 2 ] || die "--offset 需要 X,Y,Z"; extra+=(--solarxr-offset "$2"); shift ;;
+        -h | --help) usage; exit 0 ;;
+        *)
+            [[ "$1" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "看不懂的參數：$1（部位請用半形數字和逗號，例如 0,5,6）"
+            roles="$1"
+            ;;
+    esac
+    shift
+done
+
+# --- checks -------------------------------------------------------------------------------------
+
+[ -x "$CLI" ] || die "找不到 CLI：$CLI（請先在 rebocap-wivrn-bridge 執行 cargo build --release）"
+[ -f "$XR_JSON" ] || die "找不到 WiVRn 的 OpenXR runtime 檔：$XR_JSON"
+[ -n "${XDG_RUNTIME_DIR:-}" ] || die "沒有 XDG_RUNTIME_DIR，請在桌面工作階段的終端機執行"
+
+[ -e "$RECEIVER" ] || warn "找不到 Rebocap 接收器（$RECEIVER），請確認有插上"
+
+[ -S "$XDG_RUNTIME_DIR/wivrn/comp_ipc" ] ||
+    die "WiVRn 伺服器沒有在執行。請開 WiVRn（wivrn-dashboard）並按「啟動伺服器」，頭顯先不要連"
+
+pgrep -x monad2steamvr >/dev/null && die "已經有一個 CLI（monad2steamvr）在執行，請先關掉它"
+
+ss -Hltn "sport = :$BRIDGE_PORT" | grep -q . ||
+    die "bridge.exe 沒有在監聽 127.0.0.1:$BRIDGE_PORT。請先在 Bottles 開 Rebocap，再開 bridge.exe"
+
+if [ $usb -eq 1 ]; then
+    command -v adb >/dev/null || die "--usb 需要 adb（android-tools）"
+    state=$(adb get-state 2>/dev/null)
+    [ "$state" = device ] || warn "adb 目前看不到已授權的頭顯（狀態：${state:-無}），連線時可能會失敗"
+fi
+
+mkdir -p "$LOG_DIR"
+log="$LOG_DIR/cli-$(date +%Y%m%d-%H%M%S).log"
+ls -1t "$LOG_DIR"/cli-*.log 2>/dev/null | tail -n +11 | xargs -r rm -f # keep the last 10 logs
+
+say "部位：$roles"
+say "完整 log：$log"
+
+# --- run ----------------------------------------------------------------------------------------
+
+# Prints a line whenever the set of roles that actually stream poses changes.
+MONITOR='
+import json, sys, time
+published = set(int(r) for r in sys.argv[1].split(","))
+window, counts, start, last, seen = 5.0, {}, time.time(), None, False
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+    except ValueError:
+        continue
+    if d.get("device") == "tracker" and d.get("pose") and d.get("role") is not None:
+        counts[d["role"]] = counts.get(d["role"], 0) + 1
+        seen = True
+    now = time.time()
+    if now - start < window:
+        continue
+    if seen:
+        live = {r for r, c in counts.items() if c >= window * 5}
+        msg = "有資料的部位：" + (" ".join(map(str, sorted(live))) or "（無，Rebocap 是否在 VR 模式並已校準？）")
+        if published - live:
+            msg += "\n  ⚠ 已發布但沒有資料：" + " ".join(map(str, sorted(published - live)))
+        if live - published:
+            msg += "\n  ⚠ 有資料但沒有發布：" + " ".join(map(str, sorted(live - published)))
+        if msg != last:
+            print("\033[1;36m[rebocap-fbt]\033[0m " + msg, flush=True)
+            last = msg
+    counts, start = {}, now
+'
+
+on_ready() {
+    say "SolarXR 準備好了 → 現在連頭顯，然後在 Rebocap 切 VR 模式並校準"
+    notify "可以連頭顯了，接著在 Rebocap 切 VR 模式校準"
+    if [ $usb -eq 1 ]; then
+        if adb reverse tcp:9757 tcp:9757 >/dev/null &&
+            adb shell am start -a android.intent.action.VIEW -d "wivrn+tcp://127.0.0.1:9757" org.meumeu.wivrn >/dev/null; then
+            say "已透過 USB 要求頭顯連線"
+        else
+            warn "USB 連線失敗，請改用頭顯上的 WiVRn app 手動連線"
+        fi
+    fi
+}
+
+# Shows the CLI's own status lines and hides the OpenXR loader dump.
+filter_stderr() {
+    while IFS= read -r line; do
+        printf '%s\n' "$line" >>"$log"
+        case "$line" in
+            SolarXR\ ready*) on_ready ;;
+            [[:space:]]* | LOG\ * | "") ;;
+            *) printf '  %s\n' "$line" ;;
+        esac
+    done
+}
+
+# stderr first: a process substitution inherits the redirections made before it.
+XR_RUNTIME_JSON="$XR_JSON" "$CLI" --solarxr --tracker-roles "$roles" "${extra[@]}" \
+    2> >(filter_stderr) > >(python3 -I -u -c "$MONITOR" "$roles") &
+cli=$!
+
+stopping=0
+cleanup() {
+    [ $stopping -eq 1 ] && return
+    stopping=1
+    trap '' INT TERM HUP
+    if kill -0 "$cli" 2>/dev/null; then
+        say "關閉 CLI…"
+        kill -INT "$cli" 2>/dev/null
+        for _ in $(seq 50); do kill -0 "$cli" 2>/dev/null || break; sleep 0.1; done
+        kill -0 "$cli" 2>/dev/null && kill -TERM "$cli" 2>/dev/null
+    fi
+    wait "$cli" 2>/dev/null
+    if [ $keep_bridge -eq 0 ] && ss -Hltn "sport = :$BRIDGE_PORT" | grep -q .; then
+        say "要求 bridge.exe 結束…"
+        touch "$APP_DIR/bridge.quit"
+        for _ in $(seq 30); do ss -Hltn "sport = :$BRIDGE_PORT" | grep -q . || break; sleep 0.2; done
+        if ss -Hltn "sport = :$BRIDGE_PORT" | grep -q .; then
+            warn "bridge.exe 沒有回應，請在 Bottles 用「強制停止」，不要從終端機 kill 它"
+        fi
+    fi
+    say "已結束。Rebocap 請照平常關閉視窗；WiVRn 不受影響。"
+}
+trap 'cleanup; exit 0' INT TERM HUP
+
+wait "$cli"
+rc=$?
+if [ $stopping -eq 0 ]; then
+    warn "CLI 自己結束了（代碼 $rc），最後幾行 log："
+    grep -v -E '^[[:space:]]|^LOG |^$' "$log" | tail -n 5 | sed 's/^/  /'
+    cleanup
+    exit "$rc"
+fi
