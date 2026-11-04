@@ -6,12 +6,11 @@
 # and asks bridge.exe to exit through its bridge.quit file. It never kills Wine processes and never
 # touches Rebocap or the WiVRn server.
 #
-# usage: rebocap-fbt [10|6|ROLES] [--usb] [--keep-bridge] [--yaw DEG] [--offset X,Y,Z]
+# usage: rebocap-fbt [12|10|6|ROLES] [--usb] [--keep-bridge] [--yaw DEG] [--offset X,Y,Z]
 
 set -u
 
 # Paths can be overridden from the environment.
-CLI="${REBOCAP_CLI:-$HOME/Downloads/rebocap-wivrn-bridge/target/release/monad2steamvr}"
 BOTTLE="${REBOCAP_BOTTLE:-$HOME/.var/app/com.usebottles.bottles/data/bottles/bottles/Rebocap}"
 APP_DIR="$BOTTLE/drive_c/Program Files (x86)/Rebocap"
 XR_JSON="${REBOCAP_XR_RUNTIME_JSON:-/usr/share/openxr/1/openxr_wivrn.json}"
@@ -19,9 +18,36 @@ RECEIVER="${REBOCAP_RECEIVER:-/dev/serial/by-id/usb-JXQ_Ltd__Co_RebornBodyCap_Re
 BRIDGE_PORT=36850
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rebocap-fbt"
 
+# Finds the CLI (monad2steamvr): $REBOCAP_CLI, then PATH (cargo install), then a rebocap-wivrn-bridge
+# clone next to this repo, then common clone locations. Prints nothing and fails if none is found.
+find_cli() {
+    if [ -n "${REBOCAP_CLI:-}" ]; then
+        printf '%s\n' "$REBOCAP_CLI"
+        return 0
+    fi
+    command -v monad2steamvr 2>/dev/null && return 0
+    local repo_parent candidate
+    # This script is <repo>/scripts/rebocap-fbt, usually reached through a symlink in ~/.local/bin.
+    repo_parent=$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")
+    for candidate in \
+        "$repo_parent/rebocap-wivrn-bridge" \
+        "$HOME/Projects/rebocap-wivrn-bridge" \
+        "$HOME/Downloads/rebocap-wivrn-bridge" \
+        "$HOME/src/rebocap-wivrn-bridge" \
+        "$HOME/rebocap-wivrn-bridge"; do
+        if [ -x "$candidate/target/release/monad2steamvr" ]; then
+            printf '%s\n' "$candidate/target/release/monad2steamvr"
+            return 0
+        fi
+    done
+    return 1
+}
+CLI=$(find_cli) || CLI=""
+
 # Rebocap roles: 0 waist, 1/2 upper legs, 3/4 lower legs, 5/6 feet, 7 chest,
 # 9/10 upper arms, 11/12 forearms.
-PRESET_10="0,1,2,5,6,7,9,10,11,12"
+PRESET_12="0,1,2,3,4,5,6,7,9,10,11,12"
+PRESET_10="0,1,2,3,4,5,6,7,9,10"
 PRESET_6="0,1,2,3,4,7"
 
 usage() {
@@ -29,7 +55,8 @@ usage() {
 用法: rebocap-fbt [部位] [選項]
 
 部位:
-  10            平常的 10 點：腰、胸、雙腿、雙腳、雙上臂、雙前臂（預設）
+  12            12 點：腰、胸、雙腿、雙腳、雙上臂、雙前臂
+  10            平常的 10 點：腰、胸、雙腿、雙腳、雙上臂（預設）
   6             6 點測試組：腰、雙大腿、雙小腿、胸
   0,5,6         直接指定 Rebocap 部位編號
                 0 腰  1/2 大腿  3/4 小腿  5/6 腳  7 胸  9/10 上臂  11/12 前臂
@@ -58,6 +85,7 @@ extra=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        12) roles="$PRESET_12" ;;
         10 | full) roles="$PRESET_10" ;;
         6) roles="$PRESET_6" ;;
         --usb) usb=1 ;;
@@ -75,7 +103,8 @@ done
 
 # --- checks -------------------------------------------------------------------------------------
 
-[ -x "$CLI" ] || die "找不到 CLI：$CLI（請先在 rebocap-wivrn-bridge 執行 cargo build --release）"
+[ -n "$CLI" ] || die "找不到 CLI（monad2steamvr）。請先在 rebocap-wivrn-bridge 執行 cargo build --release，或用 REBOCAP_CLI 指定路徑"
+[ -x "$CLI" ] || die "找不到 CLI：$CLI（REBOCAP_CLI 指到的檔案不存在或不能執行）"
 [ -f "$XR_JSON" ] || die "找不到 WiVRn 的 OpenXR runtime 檔：$XR_JSON"
 [ -n "${XDG_RUNTIME_DIR:-}" ] || die "沒有 XDG_RUNTIME_DIR，請在桌面工作階段的終端機執行"
 
