@@ -18,7 +18,7 @@ Rebocap 追蹤器 → bridge.exe → CLI → SolarXR → WiVRn → xrizer → VR
 | WiVRn | wivrn-server / wivrn-dashboard 26.9 |
 | xrizer | xrizer-git 0.6.r6（rebocap-wivrn-bridge 作者測試的是 0.5，0.6 也正常） |
 | Rebocap | Windows 版，在 Flatpak **Bottles** 裡執行，runner 是 soda-11.0-10（有 ntsync） |
-| 追蹤器 | 平常 10 點：腰、胸、雙腿、雙腳、雙上臂、雙前臂。測試時用 6 點：腰、雙大腿、雙小腿、胸 |
+| 追蹤器 | 平常 10 點：腰、胸、雙大腿、雙小腿、雙腳、雙上臂（原本綁雙前臂，用不到就改成小腿）。測試時用 6 點：腰、雙大腿、雙小腿、胸 |
 
 ## 用到的專案
 
@@ -82,7 +82,7 @@ git clone https://github.com/TW527E/rebocap-linux-vrchat-fbt ~/Downloads/rebocap
 ln -s ~/Downloads/rebocap-linux-vrchat-fbt/scripts/rebocap-fbt ~/.local/bin/rebocap-fbt
 ```
 
-如果路徑不同，可以用環境變數覆寫：`REBOCAP_CLI`、`REBOCAP_BOTTLE`、`REBOCAP_RECEIVER`、`REBOCAP_XR_RUNTIME_JSON`。
+腳本會自動找 CLI（`monad2steamvr`），依序是：`REBOCAP_CLI`、`PATH`、跟這個 repo 放在同一層的 `rebocap-wivrn-bridge`，以及 `~/Projects`、`~/Downloads`、`~/src`、`~/` 底下的 `rebocap-wivrn-bridge`。放在其他地方，或其他路徑不同時，可以用環境變數覆寫：`REBOCAP_CLI`、`REBOCAP_BOTTLE`、`REBOCAP_RECEIVER`、`REBOCAP_XR_RUNTIME_JSON`。
 
 ### 6.（選用）右搖桿按下 = 跳躍
 
@@ -110,7 +110,8 @@ XRIZER_CUSTOM_BINDINGS_DIR=/home/<你>/.config/xrizer-bindings
 2. 在 Bottles 開 **Rebocap**，再開 **bridge.exe**。
 3. 終端機執行：
    ```sh
-   rebocap-fbt          # 10 點（預設）
+   rebocap-fbt          # 10 點（預設）：腰、胸、雙大腿、雙小腿、雙腳、雙上臂
+   rebocap-fbt 12       # 12 點：10 點再加雙前臂
    rebocap-fbt 6        # 6 點
    rebocap-fbt 10 --usb # 準備好後自動用 USB 連頭顯
    ```
@@ -121,7 +122,7 @@ XRIZER_CUSTOM_BINDINGS_DIR=/home/<你>/.config/xrizer-bindings
 腳本會顯示部位檢查：
 
 ```
-有資料的部位：0 1 2 5 6 7 9 10 11 12
+有資料的部位：0 1 2 3 4 5 6 7 9 10
   ⚠ 已發布但沒有資料：…
   ⚠ 有資料但沒有發布：…
 ```
